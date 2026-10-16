@@ -18,16 +18,16 @@
 
 namespace {
 constexpr int peakDetectorPin = 35;
-constexpr int invertedPeakDetectorPin = 36;
-constexpr int gainPotPin = 13;
+constexpr int invertedPeakDetectorPin = 34;
+constexpr int gainPotPin = 36;
 constexpr int frequencyScalePotPin = 33;
-constexpr int frequencyInputPin = 27;
-constexpr int adcSoftwareTriggerPin = 19;
+constexpr int frequencyInputPin = 26;
+constexpr int adcSoftwareTriggerPin = 27;
 constexpr int adcVsyncInputPin = 12;
 constexpr int adcClockOutputPin = 32;
 constexpr int adcClockInputPin = 39;
 // ADC D4..D11 map to consecutive I2S camera-mode data inputs 0..7.
-constexpr int adcDataPins[] = {34, 14, 16, 17, 21, 22, 26, 15};
+constexpr int adcDataPins[] = {16, 17, 5, 18, 19, 21, 22, 23};
 constexpr uint32_t potentiometerUpdatePeriodMs = 33;
 constexpr uint8_t potentiometerAverageCount = 10;
 constexpr uint8_t detectorAverageCount = 10;
@@ -1613,11 +1613,11 @@ void setup() {
   lastPlotFrameUs = lastDashboardFrameUs;
   if (captureDebugEnabled) {
     Serial.printf(
-        "Measurement inputs ready: detectors GPIO35/36, pots GPIO13/33; "
-        "frequency counter GPIO27.\n");
+        "Measurement inputs ready: detectors GPIO35/34, pots GPIO36/33; "
+        "frequency counter GPIO26.\n");
     if (adcCaptureTaskCreated) {
       Serial.printf(
-          "ADC capture ready: D4..D11 on GPIO34,14,16,17,21,22,26,15; "
+          "ADC capture ready: D4..D11 on GPIO16,17,5,18,19,21,22,23; "
           "%u MHz XCLK GPIO32, PCLK GPIO39; "
           "%u decimated samples per capture.\n",
           static_cast<unsigned>(adcCaptureHardwareClockHz / 1000000UL),
