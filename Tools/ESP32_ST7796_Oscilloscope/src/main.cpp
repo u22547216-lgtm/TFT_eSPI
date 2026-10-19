@@ -34,9 +34,27 @@ constexpr uint8_t detectorAverageCount = 10;
 constexpr float gainSmoothingFactor = 0.1f;
 constexpr float frequencyScaleSmoothingFactor = 0.2f;
 constexpr float samplingRateIndexHysteresis = 0.65f;
+constexpr uint32_t minimumDetectorHoldUs = 1000;
+struct GainCalibrationPoint {
+  float voltage;
+  float gain;
+};
+constexpr GainCalibrationPoint gainPotCalibration[] = {
+    {0.230f, 0.01805252f},
+    {0.461f, 0.44628344f},
+    {0.470f, 0.44628344f},
+    {0.526f, 0.65853659f},
+    {1.379f, 22.6415094f},
+    {1.440f, 30.66667f},
+};
+constexpr size_t gainPotCalibrationPointCount =
+    sizeof(gainPotCalibration) / sizeof(gainPotCalibration[0]);
 
 // Master gate for the debug overlay and all capture diagnostics.
-constexpr bool captureDebugEnabled = false;
+constexpr bool captureDebugEnabled = true;
+constexpr bool measurementDebugDisplayEnabled = true;
+constexpr bool measurementDebugDisplayActive =
+    captureDebugEnabled && measurementDebugDisplayEnabled;
 // Detailed I2S/DMA diagnostics require both flags to be enabled.
 constexpr bool adcCaptureDiagnosticsEnabled = false;
 constexpr bool captureDiagnosticsActive =
@@ -70,7 +88,6 @@ constexpr int captureTaskIndicatorY = 5;
 constexpr int captureTaskIndicatorWidth = 140;
 constexpr int captureTaskIndicatorHeight = 22;
 constexpr uint8_t frequencyAveragingWindows = 5;
-constexpr float peakRetriggerRatio = 0.95f;
 constexpr int panelLeft = 368;
 constexpr int panelWidth = 100;
 constexpr int panelTop = 10;
@@ -78,6 +95,8 @@ constexpr int panelRowHeight = 56;
 constexpr size_t adcCaptureSampleCount =
     static_cast<size_t>(plotSampleCount) * adcCapturePlotPlaneCount;
 constexpr uint32_t adcCaptureHardwareClockHz = 10000000UL;
+constexpr float invertedDetectorReferenceCounts =
+    3.20f * 4095.0f / 3.3f;
 constexpr size_t adcDmaWordsPerDescriptor = 1023;
 constexpr size_t adcDmaDescriptorCount = 16;
 constexpr size_t adcDmaWordCount =
@@ -372,6 +391,10 @@ const int sampling_rates[] = {100,200,300,400,500,600,700,800,900,1000,2000,3000
 // the things i believe should be global
 int Sampling_rate = 0;
 float peak = 0, valley=0, freq = 0, offset = 0, Vpp = 0, Gain;
+float peakDetectorSample = 0.0f;
+float invertedPeakDetectorSample = 0.0f;
+float gainPotMeasuredVoltage = 0.0f;
+float gainPotMeasuredGain = 0.0f;
 
 
 TFT_eSPI display;
@@ -409,6 +432,7 @@ int lastDacOutput = -1;
 int lastOutOfRangeIndicatorState = -1;
 String lastMeasurementValues[4];
 String lastFooterValues[3];
+String lastMeasurementDebugValues[2];
 DMA_ATTR uint32_t adcDmaWords[adcDmaWordCount];
 DMA_ATTR lldesc_t adcDmaDescriptors[adcDmaDescriptorCount];
 uint8_t adcSamples[adcCaptureSampleCount];
@@ -1064,6 +1088,8 @@ void adcCaptureTask(void*) {
 }
 
 void drawMeasurementBox(int row, const char* title, uint16_t color);
+String formatNumber(float value);
+String formatVoltage(float volts);
 
 void drawPlotGrid() {
   for (int division = 0; division <= horizontalDivisions; ++division) {
@@ -1141,11 +1167,37 @@ void drawCaptureDebugStats() {
     return;
   }
 
-  display.fillRect(plotLeft, plotTop + plotHeight + 3,
-                   plotWidth, 22, backgroundColor);
+  display.fillRect(plotLeft, plotTop + plotHeight + 2,
+                   plotWidth, 10, backgroundColor);
   display.setTextColor(TFT_WHITE, backgroundColor);
-  display.drawString(stats, plotLeft, plotTop + plotHeight + 5, 2);
+  display.drawString(stats, plotLeft, plotTop + plotHeight + 3, 1);
   lastDrawnStats = stats;
+}
+
+void drawMeasurementDebugStats() {
+  if (!measurementDebugDisplayActive) {
+    return;
+  }
+
+  const String gainStats =
+      "Gp: " + formatVoltage(gainPotMeasuredVoltage) +
+      "  G: " + formatNumber(gainPotMeasuredGain) +
+      "  Gf: " + formatNumber(Gain);
+  const String detectorStats =
+      "Pk: " + formatVoltage(peak * 3.3f / 4095.0f) +
+      "  Vl: " + formatVoltage(valley * 3.3f / 4095.0f);
+  if (lastMeasurementDebugValues[0] == gainStats &&
+      lastMeasurementDebugValues[1] == detectorStats) {
+    return;
+  }
+
+  display.fillRect(plotLeft, plotTop + plotHeight + 12, plotWidth, 20,
+                   backgroundColor);
+  display.setTextColor(TFT_WHITE, backgroundColor);
+  display.drawString(gainStats, plotLeft, plotTop + plotHeight + 13, 1);
+  display.drawString(detectorStats, plotLeft, plotTop + plotHeight + 23, 1);
+  lastMeasurementDebugValues[0] = gainStats;
+  lastMeasurementDebugValues[1] = detectorStats;
 }
 
 bool drawSignalPlot() {
@@ -1460,20 +1512,33 @@ void updateFrequencyMeasurement(uint32_t nowUs) {
 }
 
 uint32_t peakHoldPeriodUs() {
-  const float expectedFrequency = Sampling_rate / 100.0f;
-  if (expectedFrequency <= 0.0f) {
+  if (Sampling_rate <= 0) {
     return 1000000UL;
   }
-  const float periodUs = 1000000.0f / expectedFrequency;
-  return static_cast<uint32_t>(std::max(1.0f, periodUs));
+  const float samplingRateWindowUs =
+      100000000.0f / static_cast<float>(Sampling_rate);
+  return static_cast<uint32_t>(
+      std::max(static_cast<float>(minimumDetectorHoldUs),
+               std::min(1000000.0f, samplingRateWindowUs)));
 }
 
 void updateHeldExtreme(float sample, float& heldValue,
                        uint32_t& lastRefreshUs, uint32_t nowUs,
                        uint32_t holdPeriodUs) {
-  if (!detectorValuesInitialized ||
-      sample >= heldValue * peakRetriggerRatio) {
-    heldValue = std::max(heldValue, sample);
+  if (!detectorValuesInitialized || sample > heldValue) {
+    heldValue = sample;
+    lastRefreshUs = nowUs;
+  } else if (nowUs - lastRefreshUs >= holdPeriodUs) {
+    heldValue = sample;
+    lastRefreshUs = nowUs;
+  }
+}
+
+void updateHeldMinimum(float sample, float& heldValue,
+                       uint32_t& lastRefreshUs, uint32_t nowUs,
+                       uint32_t holdPeriodUs) {
+  if (!detectorValuesInitialized || sample < heldValue) {
+    heldValue = sample;
     lastRefreshUs = nowUs;
   } else if (nowUs - lastRefreshUs >= holdPeriodUs) {
     heldValue = sample;
@@ -1489,23 +1554,49 @@ float readDetectorAverage(int pin) {
   return total / detectorAverageCount;
 }
 
+float estimateGainFromPotVoltage(float voltage) {
+  if (voltage <= gainPotCalibration[0].voltage) {
+    return gainPotCalibration[0].gain;
+  }
+
+  for (size_t point = 1; point < gainPotCalibrationPointCount; ++point) {
+    const GainCalibrationPoint& upper = gainPotCalibration[point];
+    if (voltage <= upper.voltage) {
+      const GainCalibrationPoint& lower = gainPotCalibration[point - 1];
+      const float fraction =
+          (voltage - lower.voltage) / (upper.voltage - lower.voltage);
+      return lower.gain + fraction * (upper.gain - lower.gain);
+    }
+  }
+
+  const GainCalibrationPoint& last =
+      gainPotCalibration[gainPotCalibrationPointCount - 1];
+  const GainCalibrationPoint& previous =
+      gainPotCalibration[gainPotCalibrationPointCount - 2];
+  const float finalSegmentSlope =
+      (last.gain - previous.gain) / (last.voltage - previous.voltage);
+  return last.gain + (voltage - last.voltage) * finalSegmentSlope;
+}
+
 void updatePeakDetectors(uint32_t nowUs) {
-  const float peakSample = readDetectorAverage(peakDetectorPin);
-  const float valleySample = 4020.545455f -
-                             readDetectorAverage(invertedPeakDetectorPin);
+  peakDetectorSample = readDetectorAverage(peakDetectorPin);
+  invertedPeakDetectorSample =
+      readDetectorAverage(invertedPeakDetectorPin);
+  const float invertedValleySample =
+      invertedDetectorReferenceCounts - invertedPeakDetectorSample;
   const uint32_t holdPeriodUs = peakHoldPeriodUs();
 
-  updateHeldExtreme(peakSample, peak, lastPeakRefreshUs, nowUs,
+  updateHeldExtreme(peakDetectorSample, peak, lastPeakRefreshUs, nowUs,
                     holdPeriodUs);
-  updateHeldExtreme(valleySample, valley, lastValleyRefreshUs, nowUs,
-                    holdPeriodUs);
+  updateHeldMinimum(invertedValleySample, valley,
+                    lastValleyRefreshUs, nowUs, holdPeriodUs);
   detectorValuesInitialized = true;
 
-  offset = -((peak + valley) * 0.00040293f - 1.65f) / Gain;
-  Vpp = (peak - valley) * 0.00080586f / Gain;
+  offset = -((peak + valley)/2 * 3.3/4095 - 1.65f) / Gain;
+  Vpp = (peak - valley) * 3.3/4095 / Gain;
 
   const int dacOutput =
-      static_cast<int>((peak + valley) * 0.03113553f); 
+      static_cast<int>((peak + valley)/2 * 255/4095 /2 +255/4);
   if (dacOutput != lastDacOutput) {
     dac_output_voltage(DAC_CHANNEL_1, dacOutput);
     lastDacOutput = dacOutput;
@@ -1526,16 +1617,15 @@ void updateControlMeasurements() {
       (frequencyAdcTotal + potentiometerAverageCount / 2) /
       potentiometerAverageCount;
 
-  float measuredGain =
-      (ADC_LUT[gainAdcAverage] * 1.05 - 122.85) * 0.10776 + 0.03014;
-  if (measuredGain <= 0) {
-    measuredGain = 0.03014f;
-  }
+  gainPotMeasuredVoltage =
+      (ADC_LUT[gainAdcAverage] * 3.3/4095);
+  gainPotMeasuredGain = estimateGainFromPotVoltage(gainPotMeasuredVoltage);
   if (!gainInitialized) {
-    filteredGain = measuredGain;
+    filteredGain = gainPotMeasuredGain;
     gainInitialized = true;
   } else {
-    filteredGain += gainSmoothingFactor * (measuredGain - filteredGain);
+    filteredGain +=
+        gainSmoothingFactor * (gainPotMeasuredGain - filteredGain);
   }
   Gain = filteredGain;
   float measuredSamplingRateIndex =
@@ -1607,6 +1697,7 @@ void setup() {
   if (captureDebugEnabled) {
     drawCaptureDebugStats();
   }
+  drawMeasurementDebugStats();
   displayRateWindowStartMs = millis();
   drawDisplayChangeRate();
   lastDashboardFrameUs = micros();
@@ -1673,6 +1764,7 @@ void loop() {
     if (captureDebugEnabled) {
       drawCaptureDebugStats();
     }
+    drawMeasurementDebugStats();
     if (frameChanged && displayChangeFrames < UINT16_MAX) {
       ++displayChangeFrames;
     }
