@@ -1734,7 +1734,7 @@ void updatePeakDetectors(uint32_t nowUs) {
                     lastValleyRefreshUs, nowUs, holdPeriodUs);
   detectorValuesInitialized = true;
 
-  offset = -((peak + valley)/2 * 3.3/4095 - 1.65f) / Gain;
+  offset = -((peak + valley)/2 * 3.3/4095 - 0.823f*2) / Gain;
   Vpp = (peak - valley) * 3.3/4095 / Gain;
 
   const int dacOutput =
