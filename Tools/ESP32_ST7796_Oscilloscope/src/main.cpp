@@ -48,7 +48,9 @@ struct GainCalibrationPoint {
 constexpr GainCalibrationPoint gainPotCalibration[] = {
     {0.150f, 0.151939655f},
     {0.160f, 0.179268293f},
+    {0.170f, 0.165384615f},
     {0.180f, 0.217049719f},
+    {0.200f, 0.223076923f},
     {0.290f, 0.451219512f},
     {0.400f, 0.846153846f},
     {0.630f, 2.557692308f},
@@ -57,8 +59,8 @@ constexpr GainCalibrationPoint gainPotCalibration[] = {
     {0.950f, 9.1f},
     {1.130f, 14.13793103f},
     {1.170f, 16.66666667f},
-    {1.310f, 25.14106583f},
-    {1.330f, 25.14106583f},
+    {1.310f, 25.45454545f},
+    {1.330f, 24.82758621f},
     {1.400f, 29.23076923f},
     {1.490f, 32.85714286f},
     {1.590f, 42.12765957f},
@@ -104,11 +106,6 @@ constexpr int horizontalDivisions = 8;
 constexpr int verticalDivisions = 4;
 constexpr int plotSampleCount = plotWidth-2;
 constexpr size_t adcCapturePlotPlaneCount = 2;
-
-constexpr int outOfRangeIndicatorX = 220;
-constexpr int outOfRangeIndicatorY = 5;
-constexpr int outOfRangeIndicatorWidth = 136;
-constexpr int outOfRangeIndicatorHeight = 22;
 
 constexpr int captureTaskIndicatorX = 70;
 constexpr int captureTaskIndicatorY = 5;
@@ -460,7 +457,6 @@ float filteredFrequencyScaleIndex = 0.0f;
 int selectedSamplingRateIndex = 0;
 bool frequencyScaleInitialized = false;
 int lastDacOutput = -1;
-int lastOutOfRangeIndicatorState = -1;
 String lastMeasurementValues[4];
 String lastFooterValues[3];
 String lastMeasurementDebugValues[2];
@@ -1261,29 +1257,6 @@ void drawPlotGrid() {
   display.drawRect(plotLeft, plotTop, plotWidth, plotHeight, TFT_WHITE);
 }
 
-bool drawOutOfRangeIndicator() {
-  constexpr bool outOfRange = false;
-  const int state = outOfRange ? 1 : 0;
-  if (state == lastOutOfRangeIndicatorState) {
-    return false;
-  }
-
-  const uint16_t color = outOfRange ? TFT_RED : TFT_GREEN;
-  display.fillRect(outOfRangeIndicatorX, outOfRangeIndicatorY,
-                   outOfRangeIndicatorWidth, outOfRangeIndicatorHeight,
-                   backgroundColor);
-  display.drawRect(outOfRangeIndicatorX, outOfRangeIndicatorY,
-                   outOfRangeIndicatorWidth, outOfRangeIndicatorHeight,
-                   color);
-  display.setTextColor(color, backgroundColor);
-  display.drawCentreString(outOfRange ? "OUT OF RANGE" : "IN RANGE",
-                           outOfRangeIndicatorX +
-                               outOfRangeIndicatorWidth / 2,
-                           outOfRangeIndicatorY + 6, 1);
-  lastOutOfRangeIndicatorState = state;
-  return true;
-}
-
 void drawCaptureTaskFailureIndicator() {
   if (adcCaptureTaskCreated) {
     return;
@@ -1838,7 +1811,6 @@ void setup() {
 
   display.init();
   drawStaticUi();
-  drawOutOfRangeIndicator();
   updateControlMeasurements();
   updatePeakDetectors(micros());
   configureFrequencyCounter();
@@ -1928,7 +1900,6 @@ void loop() {
   if (nowUs - lastDashboardFrameUs >= minimumDashboardFrameIntervalUs) {
     lastDashboardFrameUs = nowUs;
     bool frameChanged = drawDashboard();
-    frameChanged |= drawOutOfRangeIndicator();
     drawDisplayChangeRate();
     if (captureDebugEnabled) {
       drawCaptureDebugStats();
