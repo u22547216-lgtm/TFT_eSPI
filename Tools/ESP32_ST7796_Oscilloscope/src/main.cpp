@@ -17,6 +17,7 @@
 #include <atomic>
 
 namespace {
+  // pin assignments
 constexpr int peakDetectorPin = 35;
 constexpr int invertedPeakDetectorPin = 34;
 constexpr int gainPotPin = 36;
@@ -28,8 +29,10 @@ constexpr int adcClockOutputPin = 32;
 constexpr int adcClockInputPin = 39;
 // ADC D4..D11 map to consecutive I2S camera-mode data inputs 0..7.
 constexpr int adcDataPins[] = {16, 17, 5, 18, 19, 21, 22, 23};
+
+// measurement parameters
 constexpr uint32_t potentiometerUpdatePeriodMs = 33;
-constexpr uint8_t potentiometerAverageCount = 10;
+constexpr uint8_t potentiometerAverageCount = 20;
 constexpr uint8_t detectorAverageCount = 10;
 constexpr float gainSmoothingFactor = 0.1f;
 constexpr float frequencyScaleSmoothingFactor = 0.2f;
@@ -60,6 +63,7 @@ constexpr bool adcCaptureDiagnosticsEnabled = false;
 constexpr bool captureDiagnosticsActive =
     captureDebugEnabled && adcCaptureDiagnosticsEnabled;
 
+// display parameters
 constexpr uint32_t maximumDashboardFrameRate = 10;
 constexpr uint32_t maximumPlotFrameRate = 60;
 constexpr uint32_t minimumDashboardFrameIntervalUs =
@@ -71,6 +75,7 @@ constexpr uint32_t maximumFrequencyWindowUs = 10UL * 1000000UL;
 constexpr uint16_t frequencyInputGlitchFilterApbCycles = 80;
 constexpr int16_t frequencyCounterLimit = 30000;
 constexpr uint16_t backgroundColor = TFT_BLACK;
+
 constexpr int plotLeft = 12;
 constexpr int plotTop = 32;
 constexpr int plotWidth = 344;
@@ -79,24 +84,30 @@ constexpr int horizontalDivisions = 8;
 constexpr int verticalDivisions = 4;
 constexpr int plotSampleCount = plotWidth-2;
 constexpr size_t adcCapturePlotPlaneCount = 2;
+
 constexpr int outOfRangeIndicatorX = 220;
 constexpr int outOfRangeIndicatorY = 5;
 constexpr int outOfRangeIndicatorWidth = 136;
 constexpr int outOfRangeIndicatorHeight = 22;
+
 constexpr int captureTaskIndicatorX = 70;
 constexpr int captureTaskIndicatorY = 5;
 constexpr int captureTaskIndicatorWidth = 140;
 constexpr int captureTaskIndicatorHeight = 22;
+
 constexpr uint8_t frequencyAveragingWindows = 5;
+
 constexpr int panelLeft = 368;
 constexpr int panelWidth = 100;
 constexpr int panelTop = 10;
 constexpr int panelRowHeight = 56;
+
 constexpr size_t adcCaptureSampleCount =
     static_cast<size_t>(plotSampleCount) * adcCapturePlotPlaneCount;
 constexpr uint32_t adcCaptureHardwareClockHz = 10000000UL;
-constexpr float invertedDetectorReferenceCounts =
-    3.20f * 4095.0f / 3.3f;
+// constexpr float invertedDetectorReferenceCounts =
+//     3.20f * 4095.0f / 3.3f;
+
 constexpr size_t adcDmaWordsPerDescriptor = 1023;
 constexpr size_t adcDmaDescriptorCount = 16;
 constexpr size_t adcDmaWordCount =
