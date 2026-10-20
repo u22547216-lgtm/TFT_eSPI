@@ -1421,6 +1421,8 @@ bool drawPlotSamples(const uint8_t* samples, size_t sampleCount) {
   if (sampleCount == 0) {
     return false;
   }
+  static int16_t previousPlotY[plotSampleCount];
+  static size_t previousPlotPointCount = 0;
   const size_t displayedSampleCount =
       std::min(sampleCount, static_cast<size_t>(plotSampleCount));
 
@@ -1449,26 +1451,39 @@ bool drawPlotSamples(const uint8_t* samples, size_t sampleCount) {
     triggerStart = closestStart;
   }
 
-  display.fillRect(plotLeft + 1, plotTop + 1, plotWidth - 2, plotHeight - 2,
-                   backgroundColor);
+  int16_t currentPlotY[plotSampleCount];
+  currentPlotY[0] = static_cast<int16_t>(
+      plotTop + plotHeight - 2 -
+      (static_cast<int>(samples[triggerStart]) * (plotHeight - 3) / 255));
+  for (size_t point = 1; point < displayedSampleCount; ++point) {
+    const size_t sampleIndex = triggerStart + point;
+    currentPlotY[point] = static_cast<int16_t>(
+        plotTop + plotHeight - 2 -
+        (static_cast<int>(samples[sampleIndex]) * (plotHeight - 3) / 255));
+  }
+
+  display.startWrite();
+  for (size_t point = 1; point < previousPlotPointCount; ++point) {
+    display.drawLine(plotLeft + static_cast<int>(point),
+                     previousPlotY[point - 1],
+                     plotLeft + 1 + static_cast<int>(point),
+                     previousPlotY[point], backgroundColor);
+  }
   drawPlotGrid();
 
   int previousX = plotLeft + 1;
-  int previousY = plotTop + plotHeight - 2 -
-                  (static_cast<int>(samples[triggerStart]) *
-                   (plotHeight - 3) /
-                   255);
+  int previousY = currentPlotY[0];
   for (size_t point = 1; point < displayedSampleCount; ++point) {
-    const size_t sampleIndex = triggerStart + point;
     const int x = plotLeft + 1 + static_cast<int>(point);
-    const int y = plotTop + plotHeight - 2 -
-                  (static_cast<int>(samples[sampleIndex]) *
-                   (plotHeight - 3) /
-                   255);
+    const int y = currentPlotY[point];
     display.drawLine(previousX, previousY, x, y, TFT_YELLOW);
     previousX = x;
     previousY = y;
   }
+  std::copy(currentPlotY, currentPlotY + displayedSampleCount,
+            previousPlotY);
+  previousPlotPointCount = displayedSampleCount;
+  display.endWrite();
   return true;
 }
 
