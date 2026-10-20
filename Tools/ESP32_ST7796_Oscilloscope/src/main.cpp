@@ -36,6 +36,7 @@ constexpr uint32_t potentiometerUpdatePeriodMs = 33;
 constexpr uint8_t potentiometerAverageCount = 20;
 constexpr uint8_t detectorAverageCount = 10;
 constexpr uint32_t softwareTriggeredCaptureMaxRate = 100000;
+constexpr uint32_t livePlotMaxSampleRate = 4000;
 constexpr uint32_t softwareSampleTimerHz = 40000000;
 constexpr float gainSmoothingFactor = 0.1f;
 constexpr float frequencyScaleSmoothingFactor = 0.2f;
@@ -467,6 +468,10 @@ TaskHandle_t adcCaptureTaskHandle = nullptr;
 bool adcCaptureTaskCreated = false;
 hw_timer_t* adcSoftwareSampleTimer = nullptr;
 volatile uint32_t adcSoftwareSampleCount = 0;
+std::atomic<uint32_t> adcSoftwareLiveSampleCount{0};
+std::atomic<bool> adcSoftwareLivePlotActive{false};
+std::atomic<bool> adcSoftwareLiveCaptureMode{false};
+uint8_t adcLivePlotSamples[plotSampleCount];
 bool adcSoftwareSampleTimerReady = false;
 std::atomic<int> adcCaptureSamplingRate{0};
 std::atomic<bool> adcCaptureRequested{false};
@@ -506,12 +511,7 @@ void IRAM_ATTR clearFrequencyCounterEventStatus() {
   PCNT.int_clr.val = 1U << PCNT_UNIT_0;
 }
 
-void IRAM_ATTR adcSoftwareSampleTimerInterrupt() {
-  const uint32_t sampleIndex = adcSoftwareSampleCount;
-  if (sampleIndex >= adcCaptureSampleCount) {
-    return;
-  }
-
+uint8_t IRAM_ATTR readAdcParallelSampleWithTrigger() {
   constexpr uint32_t triggerMask = 1U << adcSoftwareTriggerPin;
   GPIO.out_w1tc = triggerMask;
   const uint32_t gpioSnapshot = GPIO.in;
@@ -527,7 +527,29 @@ void IRAM_ATTR adcSoftwareSampleTimerInterrupt() {
           (((gpioSnapshot >> 21) & 1U) << 5) |
           (((gpioSnapshot >> 22) & 1U) << 6) |
           (((gpioSnapshot >> 23) & 1U) << 7));
-  adcSamples[sampleIndex] = static_cast<uint8_t>(255U - sample);
+  return static_cast<uint8_t>(255U - sample);
+}
+
+void IRAM_ATTR adcSoftwareSampleTimerInterrupt() {
+  if (adcSoftwareLiveCaptureMode.load(std::memory_order_relaxed)) {
+    if (!adcSoftwareLivePlotActive.load(std::memory_order_relaxed)) {
+      return;
+    }
+    const uint32_t liveSampleCount =
+        adcSoftwareLiveSampleCount.load(std::memory_order_relaxed);
+    adcLivePlotSamples[liveSampleCount % plotSampleCount] =
+        readAdcParallelSampleWithTrigger();
+    adcSoftwareLiveSampleCount.store(liveSampleCount + 1,
+                                     std::memory_order_release);
+    return;
+  }
+
+  const uint32_t sampleIndex = adcSoftwareSampleCount;
+  if (sampleIndex >= adcCaptureSampleCount) {
+    return;
+  }
+
+  adcSamples[sampleIndex] = readAdcParallelSampleWithTrigger();
   adcSoftwareSampleCount = sampleIndex + 1;
 
   if (sampleIndex + 1 == adcCaptureSampleCount &&
@@ -699,6 +721,43 @@ bool configureAdcSoftwareSampleTimer() {
   return true;
 }
 
+void setAdcSoftwareSampleTimerRate(int requestedRate) {
+  const uint64_t timerPeriodTicks =
+      (softwareSampleTimerHz + static_cast<uint32_t>(requestedRate) / 2) /
+      static_cast<uint32_t>(requestedRate);
+  timerAlarmDisable(adcSoftwareSampleTimer);
+  timerWrite(adcSoftwareSampleTimer, 0);
+  timerAlarmWrite(adcSoftwareSampleTimer, timerPeriodTicks, true);
+  timerAlarmEnable(adcSoftwareSampleTimer);
+}
+
+void captureAdcLivePlotWithSoftwareTrigger(int requestedRate) {
+  prepareAdcSoftwareTrigger();
+  adcSoftwareLiveSampleCount.store(0, std::memory_order_relaxed);
+  adcSoftwareLiveCaptureMode.store(true, std::memory_order_release);
+  adcSoftwareLivePlotActive.store(true, std::memory_order_release);
+  setAdcSoftwareSampleTimerRate(requestedRate);
+
+  int activeRate = requestedRate;
+  while (adcCaptureRequested.load(std::memory_order_acquire)) {
+    const int updatedRate =
+        adcCaptureSamplingRate.load(std::memory_order_relaxed);
+    if (updatedRate >= static_cast<int>(livePlotMaxSampleRate) ||
+        updatedRate <= 0) {
+      break;
+    }
+    if (updatedRate != activeRate) {
+      activeRate = updatedRate;
+      setAdcSoftwareSampleTimerRate(activeRate);
+    }
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+  }
+
+  adcSoftwareLivePlotActive.store(false, std::memory_order_release);
+  timerAlarmDisable(adcSoftwareSampleTimer);
+  adcSoftwareLiveCaptureMode.store(false, std::memory_order_release);
+}
+
 bool captureAdcSamplesWithSoftwareTrigger(int requestedRate,
                                           uint32_t& capturedSamples) {
   capturedSamples = 0;
@@ -710,9 +769,6 @@ bool captureAdcSamplesWithSoftwareTrigger(int requestedRate,
   adcSoftwareSampleCount = 0;
   ulTaskNotifyTake(pdTRUE, 0);
 
-  const uint64_t timerPeriodTicks =
-      (softwareSampleTimerHz + static_cast<uint32_t>(requestedRate) / 2) /
-      static_cast<uint32_t>(requestedRate);
   const uint64_t estimatedDurationMs =
       (static_cast<uint64_t>(adcCaptureSampleCount) * 1000ULL +
        static_cast<uint32_t>(requestedRate) - 1) /
@@ -720,10 +776,7 @@ bool captureAdcSamplesWithSoftwareTrigger(int requestedRate,
   const uint32_t timeoutMs = static_cast<uint32_t>(
       std::max<uint64_t>(2000ULL, estimatedDurationMs * 2ULL + 1000ULL));
 
-  timerAlarmDisable(adcSoftwareSampleTimer);
-  timerWrite(adcSoftwareSampleTimer, 0);
-  timerAlarmWrite(adcSoftwareSampleTimer, timerPeriodTicks, true);
-  timerAlarmEnable(adcSoftwareSampleTimer);
+  setAdcSoftwareSampleTimerRate(requestedRate);
   ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(timeoutMs));
   timerAlarmDisable(adcSoftwareSampleTimer);
 
@@ -908,6 +961,39 @@ void adcCaptureTask(void*) {
       }
       completeAdcCaptureRequestOnCore0();
       vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    if (requestedRate < static_cast<int>(livePlotMaxSampleRate)) {
+      stopAdcDmaCapture();
+      if (captureDebugEnabled) {
+        adcLastCaptureSampleCount.store(0, std::memory_order_relaxed);
+        adcLastCaptureFailure.store(2, std::memory_order_relaxed);
+      }
+      if (captureDiagnosticsActive) {
+        startAdcClockMonitor();
+      }
+      captureAdcLivePlotWithSoftwareTrigger(requestedRate);
+      const uint32_t capturedSamples =
+          adcSoftwareLiveSampleCount.load(std::memory_order_acquire);
+      if (captureDiagnosticsActive) {
+        bool clockMonitorLimitReached = false;
+        const int16_t clockEdges =
+            stopAdcClockMonitor(&clockMonitorLimitReached);
+        Serial.printf(
+            "Live software-trigger plot stopped at %lu samples, rate %d SPS; "
+            "GPIO39 clock edges %s%d.\n",
+            static_cast<unsigned long>(capturedSamples), requestedRate,
+            clockMonitorLimitReached ? ">=" : "",
+            static_cast<int>(clockEdges));
+      }
+      if (captureDebugEnabled) {
+        adcLastCaptureSampleCount.store(
+            std::min<uint32_t>(capturedSamples, adcCaptureSampleCount),
+            std::memory_order_relaxed);
+        adcLastCaptureFailure.store(0, std::memory_order_relaxed);
+      }
+      completeAdcCaptureRequestOnCore0();
       continue;
     }
 
@@ -1331,19 +1417,25 @@ void drawMeasurementDebugStats() {
   lastMeasurementDebugValues[1] = detectorStats;
 }
 
-bool drawSignalPlot() {
+bool drawPlotSamples(const uint8_t* samples, size_t sampleCount) {
+  if (sampleCount == 0) {
+    return false;
+  }
+  const size_t displayedSampleCount =
+      std::min(sampleCount, static_cast<size_t>(plotSampleCount));
+
   const float targetSample =
       255.0f - ((peak + valley) * 0.5f) * (255.0f / 4095.0f);
   const float triggerTolerance = std::max(
       1.0f, fabsf(peak - valley) * (255.0f / 4095.0f) * 0.05f);
   const size_t lastTriggerStart =
-      adcCaptureSampleCount - static_cast<size_t>(plotSampleCount);
+      sampleCount - displayedSampleCount;
   size_t closestStart = 0;
   float closestDistance = 256.0f;
-  size_t triggerStart = adcCaptureSampleCount;
+  size_t triggerStart = sampleCount;
 
   for (size_t sample = 0; sample <= lastTriggerStart; ++sample) {
-    const float distance = fabsf(adcSamples[sample] - targetSample);
+    const float distance = fabsf(samples[sample] - targetSample);
     if (distance < closestDistance) {
       closestDistance = distance;
       closestStart = sample;
@@ -1353,7 +1445,7 @@ bool drawSignalPlot() {
       break;
     }
   }
-  if (triggerStart == adcCaptureSampleCount) {
+  if (triggerStart == sampleCount) {
     triggerStart = closestStart;
   }
 
@@ -1363,14 +1455,14 @@ bool drawSignalPlot() {
 
   int previousX = plotLeft + 1;
   int previousY = plotTop + plotHeight - 2 -
-                  (static_cast<int>(adcSamples[triggerStart]) *
+                  (static_cast<int>(samples[triggerStart]) *
                    (plotHeight - 3) /
                    255);
-  for (int point = 1; point < plotSampleCount; ++point) {
-    const size_t sampleIndex = triggerStart + static_cast<size_t>(point);
-    const int x = plotLeft + 1 + point;
+  for (size_t point = 1; point < displayedSampleCount; ++point) {
+    const size_t sampleIndex = triggerStart + point;
+    const int x = plotLeft + 1 + static_cast<int>(point);
     const int y = plotTop + plotHeight - 2 -
-                  (static_cast<int>(adcSamples[sampleIndex]) *
+                  (static_cast<int>(samples[sampleIndex]) *
                    (plotHeight - 3) /
                    255);
     display.drawLine(previousX, previousY, x, y, TFT_YELLOW);
@@ -1378,6 +1470,29 @@ bool drawSignalPlot() {
     previousY = y;
   }
   return true;
+}
+
+bool drawSignalPlot() {
+  return drawPlotSamples(adcSamples, adcCaptureSampleCount);
+}
+
+bool drawLiveSignalPlot() {
+  const uint32_t sampleCount =
+      adcSoftwareLiveSampleCount.load(std::memory_order_acquire);
+  if (sampleCount == 0) {
+    return false;
+  }
+
+  const size_t visibleSampleCount =
+      std::min(sampleCount, static_cast<uint32_t>(plotSampleCount));
+  uint8_t samples[plotSampleCount];
+  const uint32_t firstSample =
+      sampleCount - static_cast<uint32_t>(visibleSampleCount);
+  for (size_t index = 0; index < visibleSampleCount; ++index) {
+    samples[index] =
+        adcLivePlotSamples[(firstSample + index) % plotSampleCount];
+  }
+  return drawPlotSamples(samples, visibleSampleCount);
 }
 
 void drawStaticUi() {
@@ -1861,6 +1976,8 @@ void loop() {
   static bool captureRequestPending = false;
   static bool captureReadyForPlot = false;
   static uint32_t captureSequenceAtRequest = 0;
+  static uint32_t lastLivePlotSampleCount = UINT32_MAX;
+  static bool wasLivePlotActive = false;
 
   const uint32_t nowUs = micros();
   updateFrequencyMeasurement(nowUs);
@@ -1886,6 +2003,7 @@ void loop() {
       frequencyWindowStartUs = micros();
       clearFrequencyEstimate();
     }
+    adcCaptureSamplingRate.store(Sampling_rate, std::memory_order_relaxed);
   }
 
   const uint32_t rateWindowElapsedMs = nowMs - displayRateWindowStartMs;
@@ -1907,6 +2025,26 @@ void loop() {
     drawMeasurementDebugStats();
     if (frameChanged && displayChangeFrames < UINT16_MAX) {
       ++displayChangeFrames;
+    }
+  }
+
+  const bool livePlotActive =
+      adcSoftwareLivePlotActive.load(std::memory_order_acquire);
+  if (livePlotActive && !wasLivePlotActive) {
+    lastLivePlotSampleCount = UINT32_MAX;
+  }
+  wasLivePlotActive = livePlotActive;
+  if (livePlotActive &&
+      nowUs - lastPlotFrameUs >= minimumPlotFrameIntervalUs) {
+    const uint32_t liveSampleCount =
+        adcSoftwareLiveSampleCount.load(std::memory_order_acquire);
+    if (liveSampleCount != lastLivePlotSampleCount &&
+        drawLiveSignalPlot()) {
+      lastLivePlotSampleCount = liveSampleCount;
+      lastPlotFrameUs = nowUs;
+      if (displayChangeFrames < UINT16_MAX) {
+        ++displayChangeFrames;
+      }
     }
   }
 
