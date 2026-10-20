@@ -48,16 +48,27 @@ struct GainCalibrationPoint {
 constexpr GainCalibrationPoint gainPotCalibration[] = {
     {0.150f, 0.151939655f},
     {0.160f, 0.179268293f},
-    {0.180f, 0.222560976f},
+    {0.180f, 0.217049719f},
     {0.290f, 0.451219512f},
-    {0.400f, 0.88f},
-    {0.630f, 2.557692f},
+    {0.400f, 0.846153846f},
+    {0.630f, 2.557692308f},
+    {0.740f, 4.1875f},
+    {0.810f, 5.380952381f},
+    {0.950f, 9.1f},
     {1.130f, 14.13793103f},
+    {1.170f, 16.66666667f},
     {1.310f, 25.14106583f},
     {1.330f, 25.14106583f},
+    {1.400f, 29.23076923f},
+    {1.490f, 32.85714286f},
     {1.590f, 42.12765957f},
+    {1.680f, 61.875f},
     {1.840f, 101.3333333f},
-    {2.410f, 136.0f},
+    {1.900f, 107.4074074f},
+    {2.120f, 148.1481481f},
+    {2.370f, 243.3333333f},
+    {2.480f, 335.7142857f},
+    {2.610f, 392.8571429f},
 };
 constexpr size_t gainPotCalibrationPointCount =
     sizeof(gainPotCalibration) / sizeof(gainPotCalibration[0]);
@@ -495,6 +506,10 @@ void IRAM_ATTR i2sCaptureInterrupt(void*) {
   }
 }
 
+void IRAM_ATTR clearFrequencyCounterEventStatus() {
+  PCNT.int_clr.val = 1U << PCNT_UNIT_0;
+}
+
 void IRAM_ATTR adcSoftwareSampleTimerInterrupt() {
   const uint32_t sampleIndex = adcSoftwareSampleCount;
   if (sampleIndex >= adcCaptureSampleCount) {
@@ -542,6 +557,7 @@ void IRAM_ATTR frequencyStartPulseInterrupt() {
       static_cast<int16_t>(PCNT.cnt_unit[PCNT_UNIT_0].cnt_val);
   frequencyStartPulseOverRange =
       PCNT.status_unit[PCNT_UNIT_0].h_lim_lat != 0;
+  clearFrequencyCounterEventStatus();
   PCNT.ctrl.val |= 1U;
   PCNT.ctrl.val &= ~1U;
   PCNT.ctrl.val &= ~(1U << 1);
@@ -1543,6 +1559,7 @@ void configureFrequencyCounter() {
       PCNT_UNIT_0, frequencyInputGlitchFilterApbCycles));
   ESP_ERROR_CHECK(pcnt_filter_enable(PCNT_UNIT_0));
   ESP_ERROR_CHECK(pcnt_counter_clear(PCNT_UNIT_0));
+  clearFrequencyCounterEventStatus();
   ESP_ERROR_CHECK(pcnt_counter_resume(PCNT_UNIT_0));
   attachInterrupt(digitalPinToInterrupt(frequencyInputPin),
                   frequencyStartPulseInterrupt, RISING);
@@ -1587,6 +1604,7 @@ void updateFrequencyMeasurement(uint32_t nowUs) {
       frequencyMeasurementTaskHandle = nullptr;
       ESP_ERROR_CHECK(pcnt_counter_pause(PCNT_UNIT_0));
       ESP_ERROR_CHECK(pcnt_counter_clear(PCNT_UNIT_0));
+      clearFrequencyCounterEventStatus();
       ESP_ERROR_CHECK(pcnt_counter_resume(PCNT_UNIT_0));
       frequencyWindowStartUs = nowUs;
       clearFrequencyEstimate();
@@ -1891,6 +1909,7 @@ void loop() {
       ulTaskNotifyTake(pdTRUE, 0);
       ESP_ERROR_CHECK(pcnt_counter_pause(PCNT_UNIT_0));
       ESP_ERROR_CHECK(pcnt_counter_clear(PCNT_UNIT_0));
+      clearFrequencyCounterEventStatus();
       ESP_ERROR_CHECK(pcnt_counter_resume(PCNT_UNIT_0));
       frequencyWindowStartUs = micros();
       clearFrequencyEstimate();
