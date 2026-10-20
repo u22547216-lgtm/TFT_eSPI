@@ -5,6 +5,7 @@
 #include <driver/gpio.h>
 #include <driver/ledc.h>
 #include <driver/periph_ctrl.h>
+#include <driver/timer.h>
 #include <esp_err.h>
 #include <esp_intr_alloc.h>
 #include <soc/gpio_sig_map.h>
@@ -34,6 +35,8 @@ constexpr int adcDataPins[] = {16, 17, 5, 18, 19, 21, 22, 23};
 constexpr uint32_t potentiometerUpdatePeriodMs = 33;
 constexpr uint8_t potentiometerAverageCount = 20;
 constexpr uint8_t detectorAverageCount = 10;
+constexpr uint32_t softwareTriggeredCaptureMaxRate = 100000;
+constexpr uint32_t softwareSampleTimerHz = 40000000;
 constexpr float gainSmoothingFactor = 0.1f;
 constexpr float frequencyScaleSmoothingFactor = 0.2f;
 constexpr float samplingRateIndexHysteresis = 0.65f;
@@ -47,6 +50,8 @@ constexpr GainCalibrationPoint gainPotCalibration[] = {
     {0.160f, 0.179268293f},
     {0.180f, 0.222560976f},
     {0.290f, 0.451219512f},
+    {0.400f, 0.88f},
+    {0.630f, 2.557692f},
     {1.130f, 14.13793103f},
     {1.310f, 25.14106583f},
     {1.330f, 25.14106583f},
@@ -453,6 +458,9 @@ DMA_ATTR lldesc_t adcDmaDescriptors[adcDmaDescriptorCount];
 uint8_t adcSamples[adcCaptureSampleCount];
 TaskHandle_t adcCaptureTaskHandle = nullptr;
 bool adcCaptureTaskCreated = false;
+hw_timer_t* adcSoftwareSampleTimer = nullptr;
+volatile uint32_t adcSoftwareSampleCount = 0;
+bool adcSoftwareSampleTimerReady = false;
 std::atomic<int> adcCaptureSamplingRate{0};
 std::atomic<bool> adcCaptureRequested{false};
 std::atomic<uint32_t> adcCaptureSequence{0};
@@ -479,6 +487,40 @@ void IRAM_ATTR i2sCaptureInterrupt(void*) {
     adcCaptureDmaFailed = true;
   }
   if ((captureComplete || captureError) && adcCaptureTaskHandle != nullptr) {
+    BaseType_t higherPriorityTaskWoken = pdFALSE;
+    vTaskNotifyGiveFromISR(adcCaptureTaskHandle, &higherPriorityTaskWoken);
+    if (higherPriorityTaskWoken == pdTRUE) {
+      portYIELD_FROM_ISR();
+    }
+  }
+}
+
+void IRAM_ATTR adcSoftwareSampleTimerInterrupt() {
+  const uint32_t sampleIndex = adcSoftwareSampleCount;
+  if (sampleIndex >= adcCaptureSampleCount) {
+    return;
+  }
+
+  constexpr uint32_t triggerMask = 1U << adcSoftwareTriggerPin;
+  GPIO.out_w1tc = triggerMask;
+  const uint32_t gpioSnapshot = GPIO.in;
+  GPIO.out_w1ts = triggerMask;
+
+  const uint8_t sample =
+      static_cast<uint8_t>(
+          ((gpioSnapshot >> 16) & 1U) |
+          (((gpioSnapshot >> 17) & 1U) << 1) |
+          (((gpioSnapshot >> 5) & 1U) << 2) |
+          (((gpioSnapshot >> 18) & 1U) << 3) |
+          (((gpioSnapshot >> 19) & 1U) << 4) |
+          (((gpioSnapshot >> 21) & 1U) << 5) |
+          (((gpioSnapshot >> 22) & 1U) << 6) |
+          (((gpioSnapshot >> 23) & 1U) << 7));
+  adcSamples[sampleIndex] = static_cast<uint8_t>(255U - sample);
+  adcSoftwareSampleCount = sampleIndex + 1;
+
+  if (sampleIndex + 1 == adcCaptureSampleCount &&
+      adcCaptureTaskHandle != nullptr) {
     BaseType_t higherPriorityTaskWoken = pdFALSE;
     vTaskNotifyGiveFromISR(adcCaptureTaskHandle, &higherPriorityTaskWoken);
     if (higherPriorityTaskWoken == pdTRUE) {
@@ -630,6 +672,51 @@ void prepareAdcSoftwareTrigger() {
   gpio_matrix_out(adcSoftwareTriggerPin, SIG_GPIO_OUT_IDX, false, false);
   ESP_ERROR_CHECK(gpio_set_level(
       static_cast<gpio_num_t>(adcSoftwareTriggerPin), 1));
+}
+
+bool configureAdcSoftwareSampleTimer() {
+  adcSoftwareSampleTimer = timerBegin(0, 2, true);
+  if (adcSoftwareSampleTimer == nullptr) {
+    return false;
+  }
+
+  timerAttachInterrupt(adcSoftwareSampleTimer,
+                       adcSoftwareSampleTimerInterrupt, true);
+  timerAlarmWrite(adcSoftwareSampleTimer, softwareSampleTimerHz / 100, true);
+  timerAlarmDisable(adcSoftwareSampleTimer);
+  return true;
+}
+
+bool captureAdcSamplesWithSoftwareTrigger(int requestedRate,
+                                          uint32_t& capturedSamples) {
+  capturedSamples = 0;
+  if (!adcSoftwareSampleTimerReady) {
+    return false;
+  }
+
+  prepareAdcSoftwareTrigger();
+  adcSoftwareSampleCount = 0;
+  ulTaskNotifyTake(pdTRUE, 0);
+
+  const uint64_t timerPeriodTicks =
+      (softwareSampleTimerHz + static_cast<uint32_t>(requestedRate) / 2) /
+      static_cast<uint32_t>(requestedRate);
+  const uint64_t estimatedDurationMs =
+      (static_cast<uint64_t>(adcCaptureSampleCount) * 1000ULL +
+       static_cast<uint32_t>(requestedRate) - 1) /
+      static_cast<uint32_t>(requestedRate);
+  const uint32_t timeoutMs = static_cast<uint32_t>(
+      std::max<uint64_t>(2000ULL, estimatedDurationMs * 2ULL + 1000ULL));
+
+  timerAlarmDisable(adcSoftwareSampleTimer);
+  timerWrite(adcSoftwareSampleTimer, 0);
+  timerAlarmWrite(adcSoftwareSampleTimer, timerPeriodTicks, true);
+  timerAlarmEnable(adcSoftwareSampleTimer);
+  ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(timeoutMs));
+  timerAlarmDisable(adcSoftwareSampleTimer);
+
+  capturedSamples = adcSoftwareSampleCount;
+  return capturedSamples == adcCaptureSampleCount;
 }
 
 struct AdcSoftwareTriggerDiagnostic {
@@ -809,6 +896,46 @@ void adcCaptureTask(void*) {
       }
       completeAdcCaptureRequestOnCore0();
       vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+
+    if (requestedRate <=
+        static_cast<int>(softwareTriggeredCaptureMaxRate)) {
+      stopAdcDmaCapture();
+      uint32_t capturedSamples = 0;
+      if (captureDebugEnabled) {
+        adcLastCaptureSampleCount.store(0, std::memory_order_relaxed);
+        adcLastCaptureFailure.store(2, std::memory_order_relaxed);
+      }
+      if (captureDiagnosticsActive) {
+        startAdcClockMonitor();
+      }
+      const bool captureCompleted =
+          captureAdcSamplesWithSoftwareTrigger(requestedRate,
+                                               capturedSamples);
+      if (captureDiagnosticsActive) {
+        bool clockMonitorLimitReached = false;
+        const int16_t clockEdges =
+            stopAdcClockMonitor(&clockMonitorLimitReached);
+        Serial.printf(
+            "Software-trigger capture %s, samples %lu/%u at %d SPS; "
+            "GPIO39 clock edges %s%d.\n",
+            captureCompleted ? "complete" : "timed out",
+            static_cast<unsigned long>(capturedSamples),
+            static_cast<unsigned>(adcCaptureSampleCount), requestedRate,
+            clockMonitorLimitReached ? ">=" : "",
+            static_cast<int>(clockEdges));
+      }
+      if (captureDebugEnabled) {
+        adcLastCaptureSampleCount.store(capturedSamples,
+                                        std::memory_order_relaxed);
+        adcLastCaptureFailure.store(captureCompleted ? 0 : 1,
+                                    std::memory_order_relaxed);
+      }
+      if (captureCompleted) {
+        adcCaptureSequence.fetch_add(1, std::memory_order_release);
+      }
+      completeAdcCaptureRequestOnCore0();
       continue;
     }
 
@@ -1699,6 +1826,11 @@ void setup() {
   configureFrequencyCounter();
   configureAdcClock(adcCaptureHardwareClockHz);
   configureAdcCapture();
+  adcSoftwareSampleTimerReady = configureAdcSoftwareSampleTimer();
+  if (!adcSoftwareSampleTimerReady) {
+    Serial.println(
+        "ERROR: software-trigger sample timer could not be configured.");
+  }
   if (captureDiagnosticsActive) {
     configureAdcClockMonitor();
   }
