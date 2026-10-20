@@ -43,12 +43,16 @@ struct GainCalibrationPoint {
   float gain;
 };
 constexpr GainCalibrationPoint gainPotCalibration[] = {
-    {0.230f, 0.01805252f},
-    {0.461f, 0.44628344f},
-    {0.470f, 0.44628344f},
-    {0.526f, 0.65853659f},
-    {1.379f, 22.6415094f},
-    {1.440f, 30.66667f},
+    {0.150f, 0.151939655f},
+    {0.160f, 0.179268293f},
+    {0.180f, 0.222560976f},
+    {0.290f, 0.451219512f},
+    {1.130f, 14.13793103f},
+    {1.310f, 25.14106583f},
+    {1.330f, 25.14106583f},
+    {1.590f, 42.12765957f},
+    {1.840f, 101.3333333f},
+    {2.410f, 136.0f},
 };
 constexpr size_t gainPotCalibrationPointCount =
     sizeof(gainPotCalibration) / sizeof(gainPotCalibration[0]);
