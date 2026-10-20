@@ -1583,7 +1583,7 @@ void updatePeakDetectors(uint32_t nowUs) {
   invertedPeakDetectorSample =
       readDetectorAverage(invertedPeakDetectorPin);
   const float invertedValleySample =
-      invertedDetectorReferenceCounts - invertedPeakDetectorSample;
+      1.69*2*4096/3.3 - invertedPeakDetectorSample;
   const uint32_t holdPeriodUs = peakHoldPeriodUs();
 
   updateHeldExtreme(peakDetectorSample, peak, lastPeakRefreshUs, nowUs,
@@ -1604,21 +1604,24 @@ void updatePeakDetectors(uint32_t nowUs) {
 }
 
 void updateControlMeasurements() {
-  uint32_t gainAdcTotal = 0;
+  uint32_t gainPotMillivoltsTotal = 0;
   uint32_t frequencyAdcTotal = 0;
+  // Discard the first conversion after switching ADC channels.
+  analogReadMilliVolts(gainPotPin);
   for (uint8_t sample = 0; sample < potentiometerAverageCount; ++sample) {
-    gainAdcTotal += analogRead(gainPotPin);
+    gainPotMillivoltsTotal += analogReadMilliVolts(gainPotPin);
+  }
+  analogRead(frequencyScalePotPin);
+  for (uint8_t sample = 0; sample < potentiometerAverageCount; ++sample) {
     frequencyAdcTotal += analogRead(frequencyScalePotPin);
   }
-  const uint16_t gainAdcAverage =
-      (gainAdcTotal + potentiometerAverageCount / 2) /
-      potentiometerAverageCount;
   const uint16_t frequencyAdcAverage =
       (frequencyAdcTotal + potentiometerAverageCount / 2) /
       potentiometerAverageCount;
 
   gainPotMeasuredVoltage =
-      (ADC_LUT[gainAdcAverage] * 3.3/4095);
+      static_cast<float>(gainPotMillivoltsTotal) /
+      (1000.0f * potentiometerAverageCount);
   gainPotMeasuredGain = estimateGainFromPotVoltage(gainPotMeasuredVoltage);
   if (!gainInitialized) {
     filteredGain = gainPotMeasuredGain;
